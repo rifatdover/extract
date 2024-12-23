@@ -1,0 +1,21 @@
+services:
+  extract-cli-ubuntu:
+    build:
+      context: ../
+      dockerfile: ../Dockerfile_ubuntu
+    volumes:
+      - ./test:/app/test
+    container_name: extract_cli_container_linux
+    stdin_open: true
+    tty: true
+    entrypoint: /bin/sh
+  extract-cli-windows:
+    build:
+      context: ./build/win
+      dockerfile: ../Dockerfile_windows
+    volumes:
+      - ./test:/app/test
+    container_name: extract_cli_container_windows
+    stdin_open: true
+    tty: true
+    entrypoint: /bin/sh

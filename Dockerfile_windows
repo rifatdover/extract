@@ -1,0 +1,52 @@
+# Use a Windows base image
+FROM --platform=windows/amd64 mcr.microsoft.com/windows/servercore:ltsc2019 AS build
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the project files
+COPY ../.. .
+
+# Install Maven and other dependencies
+RUN powershell -Command \
+    invoke-webrequest -uri https://downloads.apache.org/maven/maven-3/3.8.4/binaries/apache-maven-3.8.4-bin.zip -outfile maven.zip; \
+    expand-archive -path maven.zip -destinationpath C:\; \
+    remove-item -force maven.zip; \
+    [environment]::setenvironmentvariable('MAVEN_HOME', 'C:\apache-maven-3.8.4', [environmentvariabletarget]::machine); \
+    [environment]::setenvironmentvariable('Path', $env:Path + ';C:\apache-maven-3.8.4\bin', [environmentvariabletarget]::machine); \
+    invoke-webrequest -uri https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.2.27_20210311.exe -outfile gnupg.exe; \
+    start-process gnupg.exe -argumentlist '/S' -nonewwindow -wait; \
+    remove-item -force gnupg.exe
+
+# Build the project
+RUN mvn clean install -DskipTests
+
+# List the contents of the target directory
+RUN dir /app\extract-cli\target
+
+# Install additional dependencies
+RUN powershell -Command \
+    invoke-webrequest -uri https://download.microsoft.com/download/1/1/1/11111111-1111-1111-1111-111111111111/vcredist_x64.exe -outfile vcredist_x64.exe; \
+    start-process vcredist_x64.exe -argumentlist '/install', '/quiet', '/norestart' -nonewwindow -wait; \
+    remove-item -force vcredist_x64.exe
+
+# Package the application
+WORKDIR /pkg
+
+RUN jpackage \
+    --input /app/extract-cli/target \
+    --name extract \
+    --main-jar /app/extract-cli/target/extract-cli-7.3.0.jar \
+    --type app-image
+
+# Use a Windows base image for the final stage
+FROM --platform=windows/amd64  mcr.microsoft.com/windows/servercore:ltsc2019
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the packaged application from the build stage
+COPY --from=build /pkg/extract .
+
+# Set the entry point
+ENTRYPOINT ["C:\\app\\bin\\extract.exe"]

@@ -1,0 +1,42 @@
+FROM openjdk:17-jdk-slim AS build
+
+WORKDIR /app
+
+COPY ./ /app
+
+RUN ls -la /app
+
+RUN ls -la /app/pom.xml
+
+RUN apt-get update && \
+    apt-get install -y maven gnupg && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mvn clean install -DskipTests
+
+RUN ls -la /app/extract-cli/target
+
+RUN apt-get update && \
+    apt-get install -y \
+    libfreetype6 \
+    libpng16-16 \
+    libjpeg62-turbo \
+    gnupg \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /pkg
+
+RUN jpackage \
+    --input /app/extract-cli/target \
+    --name extract \
+    --main-jar /app/extract-cli/target/extract-cli-7.3.0.jar \
+    --type app-image
+
+FROM ubuntu:latest
+
+WORKDIR /app
+
+COPY --from=build /pkg/extract .
+
+ENTRYPOINT ["/app/bin/extract"]
