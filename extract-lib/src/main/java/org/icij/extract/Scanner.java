@@ -249,7 +249,7 @@ public class Scanner extends ExecutorProxy {
 		return visitor;
 	}
 
-	private void configureScannerVisitor(Path path, ScannerVisitor visitor) {
+	protected void configureScannerVisitor(Path path, ScannerVisitor visitor) {
 		final FileSystem fileSystem = path.getFileSystem();
 		// In order to make hidden-file-ignoring logic more predictable, always ignore file names starting with a
 		// dot, but only ignore DOS hidden files if the file system supports that attribute.
