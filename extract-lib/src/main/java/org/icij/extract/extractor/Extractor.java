@@ -1,13 +1,15 @@
 package org.icij.extract.extractor;
 
+import java.util.Collections;
+import java.util.stream.Stream;
 import org.apache.commons.io.TaggedIOException;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tika.config.TikaConfig;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
-import org.apache.tika.extractor.DocumentSelector;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.io.TikaInputStream;
-import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.CompositeParser;
 import org.apache.tika.parser.DigestingParser;
@@ -18,18 +20,20 @@ import org.apache.tika.parser.digestutils.CommonsDigester;
 import org.apache.tika.parser.digestutils.CommonsDigester.DigestAlgorithm;
 import org.apache.tika.parser.html.DefaultHtmlMapper;
 import org.apache.tika.parser.html.HtmlMapper;
-import org.apache.tika.parser.ocr.TesseractOCRConfig;
-import org.apache.tika.parser.ocr.TesseractOCRParser;
 import org.apache.tika.parser.pdf.PDFParserConfig;
 import org.apache.tika.sax.BodyContentHandler;
 import org.apache.tika.sax.ExpandedTitleContentHandler;
+import org.apache.tika.utils.ServiceLoaderUtils;
 import org.icij.extract.document.DocumentFactory;
 import org.icij.extract.document.PathIdentifier;
 import org.icij.extract.document.TikaDocument;
-import org.icij.extract.parser.CachingTesseractOCRParser;
+import org.icij.extract.parser.CacheParserDecorator;
+import org.icij.extract.ocr.OCRConfigAdapter;
 import org.icij.extract.parser.FallbackParser;
 import org.icij.extract.parser.HTML5Serializer;
+import org.icij.extract.ocr.OCRConfigRegistry;
 import org.icij.extract.parser.ParsingReaderWithContentHandler;
+import org.icij.extract.ocr.TesseractOCRConfigAdapter;
 import org.icij.extract.report.Reporter;
 import org.icij.spewer.MetadataTransformer;
 import org.icij.spewer.Spewer;
@@ -53,6 +57,7 @@ import java.util.Objects;
 import java.util.function.Function;
 
 import static java.lang.System.currentTimeMillis;
+import static org.icij.extract.LambdaExceptionUtils.rethrowFunction;
 
 /**
  * A reusable class that sets up Tika parsers based on runtime options.
@@ -77,6 +82,7 @@ import static java.lang.System.currentTimeMillis;
         ". Defaults to 12 hours.", parameter = "duration")
 @Option(name = "ocr", description = "Enable or disable automatic OCR. On by default.")
 public class Extractor {
+
     public enum OutputFormat {
         HTML, TEXT;
 
@@ -103,7 +109,7 @@ public class Extractor {
     private DigestingParser.Digester digester = null;
 
     private Parser defaultParser = TikaConfig.getDefaultConfig().getParser();
-    private final TesseractOCRConfig ocrConfig = new TesseractOCRConfig();
+    private OCRConfigAdapter ocrConfig;
     private final PDFParserConfig pdfConfig = new PDFParserConfig();
     private final DocumentFactory documentFactory;
 
@@ -128,20 +134,24 @@ public class Extractor {
         // In scanned documents under test from the Panama registry, different embedded images had the same ID, leading to incomplete OCRing when uniqueness detection was turned on.
         pdfConfig.setExtractUniqueInlineImagesOnly(false);
 
-        // Set a long OCR timeout by default, because Tika's is too short.
-        setOcrTimeout(Duration.ofDays(1));
-
         // English text recognition by default.
-        ocrConfig.setLanguage("eng");
+        ocrConfig = new TesseractOCRConfigAdapter();
+        ocrConfig.setLanguages("eng");
+        ocrConfig.setOcrTimeout(Duration.ofDays(1));
     }
 
     public Extractor() {
         this(new DocumentFactory().withIdentifier(new PathIdentifier()));
     }
 
-    public Extractor configure(final Options<String> options) {
+    public Extractor configure(final Options<String> options) throws ReflectiveOperationException {
         options.get("outputFormat", "TEXT").parse().asEnum(OutputFormat::parse).ifPresent(this::setOutputFormat);
         options.get("embedHandling", "SPAWN").parse().asEnum(EmbedHandling::parse).ifPresent(this::setEmbedHandling);
+        options.get("ocrType", String.valueOf(OCRConfigRegistry.TESSERACT))
+            .parse()
+            .asEnum(OCRConfigRegistry::parse)
+            .map(rethrowFunction(OCRConfigRegistry::newAdapter))
+            .ifPresent(this::setOcrConfig);
         options.get("ocrLanguage", "eng").value().ifPresent(this::setOcrLanguage);
         options.get("ocrTimeout", "12h").parse().asDuration().ifPresent(this::setOcrTimeout);
         options.valueIfPresent("embedOutput").ifPresent(embedOutput -> setEmbedOutputPath(Paths.get(embedOutput)));
@@ -156,8 +166,9 @@ public class Extractor {
             disableOcr();
         }
 
-        options.valueIfPresent("ocrCache").ifPresent(path -> replaceParser(TesseractOCRParser.class,
-                new CachingTesseractOCRParser(Paths.get(path))));
+        options.valueIfPresent("ocrCache").ifPresent(
+            path -> replaceParser(ocrConfig.getParserClass(), parser -> new CacheParserDecorator(parser, Paths.get(path)))
+        );
         logger.info("extractor configured with digester {} and {}", digester.getClass(), documentFactory);
 
         return this;
@@ -188,6 +199,10 @@ public class Extractor {
      */
     public void setEmbedHandling(final EmbedHandling embedHandling) {
         this.embedHandling = embedHandling;
+    }
+
+    public void setOcrConfig(final OCRConfigAdapter<?, ?> ocrConfig) {
+        this.ocrConfig = ocrConfig;
     }
 
     /**
@@ -223,7 +238,7 @@ public class Extractor {
      * @param ocrLanguage the languages to use, for example "eng" or "ita+spa"
      */
     public void setOcrLanguage(final String ocrLanguage) {
-        ocrConfig.setLanguage(ocrLanguage);
+        ocrConfig.setLanguages(ocrLanguage.split("\\+"));
     }
 
     /**
@@ -232,7 +247,7 @@ public class Extractor {
      * @param ocrTimeout the duration in seconds
      */
     private void setOcrTimeout(final int ocrTimeout) {
-        ocrConfig.setTimeoutSeconds(ocrTimeout);
+        ocrConfig.setParsingTimeoutS(ocrTimeout);
     }
 
     /**
@@ -257,7 +272,7 @@ public class Extractor {
      */
     public void disableOcr() {
         if (!ocrDisabled) {
-            excludeParser(TesseractOCRParser.class);
+            excludeParser(ocrConfig.getParserClass());
             ocrDisabled = true;
             pdfConfig.setExtractInlineImages(false);
         }
@@ -310,7 +325,7 @@ public class Extractor {
         }
 
         // For tagged IO exceptions, discard the tag, which is either unwanted or not serializable.
-        if (null != exception && (exception instanceof TaggedIOException)) {
+        if ((exception instanceof TaggedIOException)) {
             exception = ((TaggedIOException) exception).getCause();
         }
 
@@ -395,31 +410,10 @@ public class Extractor {
         } else {
             handler = BodyContentHandler::new;
         }
-        return getTikaDocument(path, handler, metadata -> true);
+        return getTikaDocument(path, handler);
     }
 
-    public List<Pair<Long, Long>> extractPageIndices(final Path path) throws IOException {
-        return extractPageIndices(path, metadata -> true);
-    }
-
-    public List<Pair<Long, Long>> extractPageIndices(final Path path, DocumentSelector documentSelector) throws IOException {
-        final Function<Writer, ContentHandler> handlerProvider;
-        PageIndicesContentHandler contentHandler;
-        boolean notEmbedded = documentSelector.select(new Metadata());
-        if (OutputFormat.HTML == outputFormat) {
-            contentHandler = new PageIndicesContentHandler(new ExpandedTitleContentHandler(new HTML5Serializer(Writer.nullWriter())), notEmbedded);
-        } else {
-            contentHandler = new PageIndicesContentHandler(new BodyContentHandler(Writer.nullWriter()), notEmbedded);
-        }
-        handlerProvider = (writer) -> contentHandler;
-        TikaDocument tikaDocument = getTikaDocument(path, handlerProvider, documentSelector);
-        try (final Reader reader = tikaDocument.getReader()) {
-            Spewer.copy(reader, Writer.nullWriter());
-        }
-        return contentHandler.getPageIndices();
-    }
-
-    private TikaDocument getTikaDocument(Path path, final Function<Writer, ContentHandler> handlerProvider, DocumentSelector documentSelector) throws IOException {
+    private TikaDocument getTikaDocument(Path path, final Function<Writer, ContentHandler> handlerProvider) throws IOException {
         final TikaDocument rootDocument = documentFactory.create(path);
         TikaInputStream tikaInputStream = TikaInputStream.get(path, rootDocument.getMetadata());
         final ParseContext context = new ParseContext();
@@ -437,7 +431,7 @@ public class Extractor {
         }
 
         if (!ocrDisabled) {
-            context.set(TesseractOCRConfig.class, ocrConfig);
+            context.set(ocrConfig.getParserClass(), ocrConfig.getConfig());
         }
 
         context.set(PDFParserConfig.class, pdfConfig);
@@ -445,8 +439,6 @@ public class Extractor {
         // Only include "safe" tags in the HTML output from Tika's HTML parser.
         // This excludes script tags and objects.
         context.set(HtmlMapper.class, DefaultHtmlMapper.INSTANCE);
-
-        context.set(DocumentSelector.class, documentSelector);
 
         if (EmbedHandling.SPAWN == embedHandling) {
             context.set(Parser.class, parser);
@@ -465,26 +457,64 @@ public class Extractor {
         return rootDocument;
     }
 
+    public List<Pair<Long, Long>> extractPageIndices(final Path path) throws IOException {
+        final Function<Writer, ContentHandler> handlerProvider;
+        PageIndicesContentHandler contentHandler;
+        if (OutputFormat.HTML == outputFormat) {
+            contentHandler = new PageIndicesContentHandler(new ExpandedTitleContentHandler(new HTML5Serializer(Writer.nullWriter())));
+        } else {
+            contentHandler = new PageIndicesContentHandler(new BodyContentHandler(Writer.nullWriter()));
+        }
+        handlerProvider = (writer) -> contentHandler;
+        TikaDocument tikaDocument = getTikaDocument(path, handlerProvider);
+        try (final Reader reader = tikaDocument.getReader()) {
+            Spewer.copy(reader, Writer.nullWriter());
+        }
+        return contentHandler.getPageIndices();
+    }
+
+    public List<Pair<Long, Long>> extractPageIndices(final Path path, final String embeddedDocId) throws IOException {
+        throw new NotImplementedException("TODO");
+    }
+
     private void excludeParser(final Class<? extends Parser> exclude) {
         replaceParser(exclude, null);
     }
 
-    private void replaceParser(final Class<? extends Parser> exclude, final Parser replacement) {
-        if (defaultParser instanceof CompositeParser) {
-            final CompositeParser composite = (CompositeParser) defaultParser;
+    public static CompositeParser replaceParser(Parser parser, final Class<? extends Parser> exclude, final Function<Parser, Parser> parserFn) {
+        if (parser instanceof CompositeParser composite) {
             final List<Parser> parsers = new ArrayList<>();
-
-            composite.getAllComponentParsers().forEach(parser -> {
-                if (parser.getClass().equals(exclude) || exclude.isAssignableFrom(parser.getClass())) {
-                    if (null != replacement) {
-                        parsers.add(replacement);
+            getAllSubParsers(composite).forEach(p -> {
+                if (p.getClass().equals(exclude) || exclude.isAssignableFrom(p.getClass())) {
+                    if (parserFn != null) {
+                        parsers.add(parserFn.apply(p));
                     }
                 } else {
-                    parsers.add(parser);
+                    parsers.add(p);
                 }
             });
-
-            defaultParser = new CompositeParser(composite.getMediaTypeRegistry(), parsers);
+            ServiceLoaderUtils.sortLoadedClasses(parsers);
+            //reverse the order of parsers so that custom ones come last
+            //this will prevent them from being overwritten in getParsers(ParseContext ..)
+            Collections.reverse(parsers);
+            return new CompositeParser(composite.getMediaTypeRegistry(), parsers);
         }
+        return null;
+    }
+
+    public static Stream<Parser> getAllSubParsers(CompositeParser compositeParser) {
+        return compositeParser.getAllComponentParsers().stream().flatMap(
+            sub -> {
+                if (sub instanceof CompositeParser composite) {
+                    return getAllSubParsers(composite);
+                } else {
+                    return Stream.of(sub);
+                }
+            }
+        );
+    }
+
+    private void replaceParser(final Class<? extends Parser> exclude, final Function<Parser, Parser> parserFn) {
+        defaultParser = replaceParser(defaultParser, exclude, parserFn);
     }
 }
