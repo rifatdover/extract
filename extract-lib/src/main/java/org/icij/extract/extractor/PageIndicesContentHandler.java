@@ -1,6 +1,6 @@
 package org.icij.extract.extractor;
 
-import org.apache.commons.lang3.tuple.Pair;
+import org.apache.tika.Tika;
 import org.apache.tika.sax.ContentHandlerDecorator;
 import org.xml.sax.Attributes;
 import org.xml.sax.ContentHandler;
@@ -18,65 +18,107 @@ import java.util.List;
 public class PageIndicesContentHandler extends ContentHandlerDecorator {
     final static private String pageTag = "div";
     final static private String pageClass = "page";
-    private boolean firstPageStarted = false;
-    private long charIndex = 0;
     private long pageStartIndex = 0;
-    private boolean startPageCalled = false;
+    private boolean bodyStarted = false;
+    private int embeddedLevel = -1;
 
+    protected boolean startPageCalled = false;
+    protected long charIndex = 0;
+
+    /**
+     * this is a hack to simulate the text.trim() that is done in ElasticsearchSpewer
+     */
+    private boolean firstCharReceived = false;
     private final List<Pair<Long, Long>> pageIndices = new LinkedList<>();
 
     public PageIndicesContentHandler(ContentHandler handler) {
         super(handler);
     }
 
-    public List<Pair<Long, Long>> getPageIndices() {
-        return pageIndices;
+    public PageIndices getPageIndices() {
+        return new PageIndices(Tika.getString(), pageIndices);
+    }
+
+    @Override
+    public void startDocument() throws SAXException {
+        super.startDocument();
+        embeddedLevel++;
+    }
+
+    @Override
+    public void endDocument() throws SAXException {
+        super.endDocument();
+        embeddedLevel--;
     }
 
     @Override
     public void startElement(String uri, String localName, String qName, Attributes atts) throws SAXException {
         super.startElement(uri, localName, qName, atts);
-        if (pageTag.endsWith(qName) && pageClass.equals(atts.getValue("class"))) {
-            startPage();
+        if ("body".equals(qName)) {
+            bodyStarted = true;
         }
-    }
-
-    @Override
-    public void endElement(String uri, String localName, String qName) throws SAXException {
-        super.endElement(uri, localName, qName);
-        if (pageTag.endsWith(qName)) {
-            endPage();
+        if (pageTag.endsWith(qName) && pageClass.equals(atts.getValue("class")) && embeddedLevel == 0) {
+            startPage();
         }
     }
 
     @Override
     public void characters(char[] ch, int start, int length) throws SAXException {
         super.characters(ch, start, length);
-        if (firstPageStarted) {
+        firstCharReceived = documentStarted();
+        if (shouldCountChars()) {
             charIndex += length;
+        }
+    }
+
+    protected boolean shouldCountChars() {
+        return documentStarted() && bodyStarted;
+    }
+
+    protected boolean documentStarted() {
+        return embeddedLevel >= 0;
+    }
+
+    @Override
+    public void endElement(String uri, String localName, String qName) throws SAXException {
+        super.endElement(uri, localName, qName);
+        if ("body".equals(qName)) {
+            bodyStarted = false;
+        }
+        if (pageTag.endsWith(qName) && embeddedLevel == 0) {
+            endPage();
         }
     }
 
     @Override
     public void ignorableWhitespace(char[] ch, int start, int length) throws SAXException {
         super.ignorableWhitespace(ch, start, length);
-        if (firstPageStarted) {
+        if (firstCharReceived && shouldCountChars()) {
             charIndex += length;
         }
     }
 
     protected void startPage() {
-        firstPageStarted = true;
         startPageCalled = true;
         pageStartIndex = charIndex;
     }
 
-    protected void endPage() {
+    /**
+     * endPage() called when end page div is found.
+     * @return true if the page was declared started before: endPage() can be called several times
+     */
+    protected boolean endPage() {
+        boolean memoizedStartPageCalled = startPageCalled;
         if (startPageCalled) {
             startPageCalled = false;
-        } else {
-            pageIndices.remove(pageIndices.size() - 1); // replacing the last page with extension
+        } else if (!pageIndices.isEmpty()) {
+            // endPage() is being called several times
+            // so we are replacing the last page with additional characters
+            pageIndices.remove(pageIndices.size() - 1);
         }
-        pageIndices.add(Pair.of(pageStartIndex, charIndex));
+        if (charIndex != 0) {
+            pageIndices.add(new Pair<>(pageStartIndex, charIndex));
+        }
+        return memoizedStartPageCalled;
     }
 }

@@ -21,11 +21,25 @@ public enum OCRConfigRegistry {
         }
     }
 
-    public OCRConfigAdapter<?, ?> newAdapter() throws NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
-        return (OCRConfigAdapter<?, ?>) this.getAdapterClass().getConstructor().newInstance();
+    public OCRConfigAdapter<?, ?> newAdapter() {
+        Class<?> adapterClass = this.getAdapterClass();
+        try {
+            return (OCRConfigAdapter<?, ?>) adapterClass.getConstructor().newInstance();
+        } catch (IllegalAccessException e) {
+            throw new OCRConfigRegistryAdapterException(adapterClass + " no-arg constructor is not accessible", e);
+        } catch (NoSuchMethodException e) {
+            throw new OCRConfigRegistryAdapterException(adapterClass + " has no no-arg constructor", e);
+        } catch (InvocationTargetException | InstantiationException e) {
+            throw new OCRConfigRegistryAdapterException ("failed to instanciate " + adapterClass + " using has no no-arg constructor", e);
+        }
     }
 
     public static OCRConfigRegistry parse(final String ocrType) {
         return valueOf(ocrType.toUpperCase(Locale.ROOT));
+    }
+    public static class OCRConfigRegistryAdapterException extends RuntimeException {
+        public OCRConfigRegistryAdapterException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 }

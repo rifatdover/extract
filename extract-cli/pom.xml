@@ -5,10 +5,11 @@
     <parent>
         <artifactId>extract</artifactId>
         <groupId>org.icij.extract</groupId>
-        <version>9.0.0.4</version>
+        <version>9.4.6.0</version>
     </parent>
 
     <artifactId>extract-cli</artifactId>
+    <name>Extract Cli</name>
     <packaging>jar</packaging>
 
     <properties>

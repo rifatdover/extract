@@ -1,13 +1,11 @@
 package org.icij.extract.extractor;
 
-import java.util.Collections;
-import java.util.stream.Stream;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.TaggedIOException;
-import org.apache.commons.lang3.NotImplementedException;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tika.config.TikaConfig;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.extractor.DocumentSelector;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.parser.AutoDetectParser;
@@ -27,13 +25,13 @@ import org.apache.tika.utils.ServiceLoaderUtils;
 import org.icij.extract.document.DocumentFactory;
 import org.icij.extract.document.PathIdentifier;
 import org.icij.extract.document.TikaDocument;
-import org.icij.extract.parser.CacheParserDecorator;
 import org.icij.extract.ocr.OCRConfigAdapter;
+import org.icij.extract.ocr.OCRConfigRegistry;
+import org.icij.extract.ocr.TesseractOCRConfigAdapter;
+import org.icij.extract.parser.CacheParserDecorator;
 import org.icij.extract.parser.FallbackParser;
 import org.icij.extract.parser.HTML5Serializer;
-import org.icij.extract.ocr.OCRConfigRegistry;
 import org.icij.extract.parser.ParsingReaderWithContentHandler;
-import org.icij.extract.ocr.TesseractOCRConfigAdapter;
 import org.icij.extract.report.Reporter;
 import org.icij.spewer.MetadataTransformer;
 import org.icij.spewer.Spewer;
@@ -47,17 +45,23 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static java.lang.System.currentTimeMillis;
+import static java.util.Optional.ofNullable;
 import static org.icij.extract.LambdaExceptionUtils.rethrowFunction;
+import static org.icij.extract.extractor.ArtifactUtils.getEmbeddedPath;
 
 /**
  * A reusable class that sets up Tika parsers based on runtime options.
@@ -81,7 +85,10 @@ import static org.icij.extract.LambdaExceptionUtils.rethrowFunction;
 @Option(name = "ocrTimeout", description = "Set the timeout for the Tesseract process to finish e.g. \"5s\" or \"1m\"" +
         ". Defaults to 12 hours.", parameter = "duration")
 @Option(name = "ocr", description = "Enable or disable automatic OCR. On by default.")
+@Option(name = "ocrType", description = "Name of the OCR to use TESSERACT, TESS4J")
 public class Extractor {
+
+    public static final String PAGES_JSON = "pages.json";
 
     public enum OutputFormat {
         HTML, TEXT;
@@ -109,10 +116,9 @@ public class Extractor {
     private DigestingParser.Digester digester = null;
 
     private Parser defaultParser = TikaConfig.getDefaultConfig().getParser();
-    private OCRConfigAdapter ocrConfig;
+    protected OCRConfigAdapter ocrConfig;
     private final PDFParserConfig pdfConfig = new PDFParserConfig();
     private final DocumentFactory documentFactory;
-
     private OutputFormat outputFormat = OutputFormat.TEXT;
     private EmbedHandling embedHandling = EmbedHandling.getDefault();
     private Path embedOutput = null;
@@ -152,7 +158,7 @@ public class Extractor {
         return pdfConfig;
     }
 
-    public Extractor configure(final Options<String> options) throws ReflectiveOperationException {
+    public Extractor configure(final Options<String> options) {
         options.get("outputFormat", "TEXT").parse().asEnum(OutputFormat::parse).ifPresent(this::setOutputFormat);
         options.get("embedHandling", "SPAWN").parse().asEnum(EmbedHandling::parse).ifPresent(this::setEmbedHandling);
         options.get("ocrType", String.valueOf(OCRConfigRegistry.TESSERACT))
@@ -211,6 +217,20 @@ public class Extractor {
 
     public void setOcrConfig(final OCRConfigAdapter<?, ?> ocrConfig) {
         this.ocrConfig = ocrConfig;
+        Parser ocrParser;
+        Class<?> parserClass = ocrConfig.getParserClass();
+        try {
+            ocrParser = (Parser) parserClass.getConstructor().newInstance();
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(parserClass + " no-arg constructor is not accessible");
+        } catch (NoSuchMethodException e) {
+            throw new RuntimeException(parserClass + " has no no-arg constructor");
+        } catch (InvocationTargetException | InstantiationException e) {
+            throw new RuntimeException("failed to instanciate " + parserClass + " using has no no-arg constructor");
+        }
+        for (OCRConfigRegistry c: OCRConfigRegistry.values()) {
+            replaceParser(c.newAdapter().getParserClass(), parser -> ocrParser);
+        }
     }
 
     /**
@@ -418,10 +438,92 @@ public class Extractor {
         } else {
             handler = BodyContentHandler::new;
         }
-        return getTikaDocument(path, handler);
+
+        return getTikaDocument(path, handler, metadata -> true);
     }
 
-    private TikaDocument getTikaDocument(Path path, final Function<Writer, ContentHandler> handlerProvider) throws IOException {
+    public PageIndices extractPageIndices(final Path path, DocumentSelector documentSelector, String docId) throws IOException {
+        Path cachedDirectory = ofNullable(embedOutput).map(p -> getEmbeddedPath(p, docId)).orElse(null);
+        if (cachedDirectory != null && cachedDirectory.resolve(PAGES_JSON).toFile().exists()) {
+            return new ObjectMapper().readValue(cachedDirectory.resolve(PAGES_JSON).toFile(),  PageIndices.class);
+        } else {
+            PageIndices pageIndices = extractPageIndices(path, documentSelector);
+            if (cachedDirectory != null) {
+                Files.createDirectories(cachedDirectory);
+                new ObjectMapper().writeValue(cachedDirectory.resolve(PAGES_JSON).toFile(), pageIndices);
+            }
+            return pageIndices;
+        }
+    }
+
+    public PageIndices extractPageIndices(final Path path) throws IOException {
+        return extractPageIndices(path, metadata -> true);
+    }
+
+    public List<String> extractPages(final Path path) throws IOException {
+        return extractPages(path, metadata -> true);
+    }
+
+    /**
+     * the model List<String>> works for one document. If we wanted to do it for a document tree it would need
+     * a composite pattern with a representation like:
+     * DocumentPages = [ [Text, [[Text], [Text ]], Text ],  [Text]]
+     *
+     * (for a doc that has two pages with an embedded  2 pages doc in the middle of its first page)
+     *
+     * @param path
+     * @param documentSelector
+     * @return
+     * @throws IOException
+     */
+    public List<String> extractPages(Path path, DocumentSelector documentSelector) throws IOException {
+        PagesContentHandler contentHandler = createContentHandlerForPages();
+        final Function<Writer, ContentHandler> handlerProvider = (writer) -> contentHandler;
+        TikaDocument tikaDocument = getTikaDocument(path, handlerProvider, documentSelector);
+        try (final Reader reader = tikaDocument.getReader()) {
+            Spewer.copy(reader, Writer.nullWriter());
+        }
+        return contentHandler.getPages();
+    }
+
+    /**
+     * Same note as the page extraction : the List<Pair<Long, Long>> works with a single doc.
+     * In the same use case as previous method we'd have:
+     *
+     * DocumentPageIndices = [ [(i1, i2), [[(i3, i4)], [(i5, i6) ]], (i7, i8) ],  [(i9, i10)]]
+     *
+     * @param path
+     * @param documentSelector
+     * @return
+     * @throws IOException
+     */
+    public PageIndices extractPageIndices(final Path path, DocumentSelector documentSelector) throws IOException {
+        PageIndicesContentHandler contentHandler = createContentHandlerForPageIndices();
+        final Function<Writer, ContentHandler> handlerProvider = (writer) -> contentHandler;
+        TikaDocument tikaDocument = getTikaDocument(path, handlerProvider, documentSelector);
+        try (final Reader reader = tikaDocument.getReader()) {
+            Spewer.copy(reader, Writer.nullWriter());
+        }
+        return contentHandler.getPageIndices();
+    }
+
+    private PagesContentHandler createContentHandlerForPages() {
+        if (OutputFormat.HTML == outputFormat) {
+            return new PagesContentHandler(new ExpandedTitleContentHandler(new HTML5Serializer(Writer.nullWriter())));
+        } else {
+            return new PagesContentHandler(new BodyContentHandler(Writer.nullWriter()));
+        }
+    }
+
+    private PageIndicesContentHandler createContentHandlerForPageIndices() {
+        if (OutputFormat.HTML == outputFormat) {
+            return new PageIndicesContentHandler(new ExpandedTitleContentHandler(new HTML5Serializer(Writer.nullWriter())));
+        } else {
+            return new PageIndicesContentHandler(new BodyContentHandler(Writer.nullWriter()));
+        }
+    }
+
+    private TikaDocument getTikaDocument(Path path, final Function<Writer, ContentHandler> handlerProvider, DocumentSelector documentSelector) throws IOException {
         final TikaDocument rootDocument = documentFactory.create(path);
         TikaInputStream tikaInputStream = TikaInputStream.get(path, rootDocument.getMetadata());
         final ParseContext context = new ParseContext();
@@ -443,6 +545,7 @@ public class Extractor {
         }
 
         context.set(PDFParserConfig.class, pdfConfig);
+        context.set(DocumentSelector.class, documentSelector);
 
         // Only include "safe" tags in the HTML output from Tika's HTML parser.
         // This excludes script tags and objects.
@@ -463,26 +566,6 @@ public class Extractor {
         rootDocument.setReader(reader);
 
         return rootDocument;
-    }
-
-    public List<Pair<Long, Long>> extractPageIndices(final Path path) throws IOException {
-        final Function<Writer, ContentHandler> handlerProvider;
-        PageIndicesContentHandler contentHandler;
-        if (OutputFormat.HTML == outputFormat) {
-            contentHandler = new PageIndicesContentHandler(new ExpandedTitleContentHandler(new HTML5Serializer(Writer.nullWriter())));
-        } else {
-            contentHandler = new PageIndicesContentHandler(new BodyContentHandler(Writer.nullWriter()));
-        }
-        handlerProvider = (writer) -> contentHandler;
-        TikaDocument tikaDocument = getTikaDocument(path, handlerProvider);
-        try (final Reader reader = tikaDocument.getReader()) {
-            Spewer.copy(reader, Writer.nullWriter());
-        }
-        return contentHandler.getPageIndices();
-    }
-
-    public List<Pair<Long, Long>> extractPageIndices(final Path path, final String embeddedDocId) throws IOException {
-        throw new NotImplementedException("TODO");
     }
 
     private void excludeParser(final Class<? extends Parser> exclude) {

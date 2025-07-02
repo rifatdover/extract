@@ -1,18 +1,24 @@
 package org.icij.extract.document;
 
+import org.apache.tika.Tika;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Property;
 
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.apache.tika.metadata.TikaCoreProperties.RESOURCE_NAME_KEY;
 
 public class TikaDocument {
+	public static final String TIKA_VERSION = "Tika-Version";
 	public static String CONTENT_ENCODING = "Content-Encoding";
 	public static String CONTENT_LANGUAGE = "Content-Language";
 	public static String CONTENT_LENGTH = "Content-Length";
@@ -28,9 +34,9 @@ public class TikaDocument {
 	private String language = null;
 	private String foreignId = null;
 	private final Metadata metadata;
-	private Identifier identifier;
-	private List<EmbeddedTikaDocument> embeds = new LinkedList<>();
-	private Map<String, EmbeddedTikaDocument> lookup = new HashMap<>();
+	private final Identifier identifier;
+	private final List<EmbeddedTikaDocument> embeds = new LinkedList<>();
+	private final Map<String, EmbeddedTikaDocument> lookup = new HashMap<>();
 	private Reader reader = null;
 	private ReaderGenerator readerGenerator = null;
 	private boolean isDuplicate;
@@ -53,6 +59,7 @@ public class TikaDocument {
 		this.identifier = identifier;
 		this.language = language;
 		this.id = ()-> id;
+		this.metadata.set(TIKA_VERSION, Tika.getString());
 	}
 
 	/**
@@ -65,12 +72,7 @@ public class TikaDocument {
 	 * @param metadata document metadata
 	 */
 	public TikaDocument(final String id, final Identifier identifier, final Path path, final Metadata metadata) {
-		Objects.requireNonNull(path, "The path must not be null.");
-
-		this.metadata = metadata;
-		this.path = path;
-		this.identifier = identifier;
-		this.id = ()-> id;
+		this(id, identifier, path, null, metadata);
 	}
 
 	/**
@@ -119,6 +121,7 @@ public class TikaDocument {
 			this.id = ()-> id;
 			return id;
 		};
+		this.metadata.set(TIKA_VERSION, Tika.getString());
 	}
 
 	/**
