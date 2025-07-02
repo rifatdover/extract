@@ -144,6 +144,14 @@ public class Extractor {
         this(new DocumentFactory().withIdentifier(new PathIdentifier()));
     }
 
+    public OCRConfigAdapter ocrConfig() {
+        return ocrConfig;
+    }
+
+    public PDFParserConfig pdfConfig() {
+        return pdfConfig;
+    }
+
     public Extractor configure(final Options<String> options) throws ReflectiveOperationException {
         options.get("outputFormat", "TEXT").parse().asEnum(OutputFormat::parse).ifPresent(this::setOutputFormat);
         options.get("embedHandling", "SPAWN").parse().asEnum(EmbedHandling::parse).ifPresent(this::setEmbedHandling);
