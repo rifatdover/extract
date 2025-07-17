@@ -81,13 +81,13 @@ public class EmbedParser extends ParsingEmbeddedDocumentExtractor {
 		} catch (final EncryptedDocumentException e) {
 			logger.error("Unable to decrypt encrypted document embedded in document: \"{}\" ({}) (in \"{}\").",
 					metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY), metadata.get(Metadata.CONTENT_TYPE), root, e);
-			metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_EMBEDDED_STREAM,
-					ExceptionUtils.getFilteredStackTrace(e));
+//			metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_EMBEDDED_STREAM,
+//					ExceptionUtils.getFilteredStackTrace(e));
 		} catch (final TikaException e) {
 			logger.error("Unable to parse embedded document: \"{}\" ({}) (in \"{}\").",
 					metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY), metadata.get(Metadata.CONTENT_TYPE), root, e);
-			metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_EMBEDDED_STREAM,
-					ExceptionUtils.getFilteredStackTrace(e));
+//			metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_EMBEDDED_STREAM,
+//					ExceptionUtils.getFilteredStackTrace(e));
 		}
 	}
 
